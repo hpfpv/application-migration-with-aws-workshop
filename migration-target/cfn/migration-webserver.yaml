@@ -30,7 +30,7 @@ Resources:
         Statement:
           - Effect: "Allow"
             Action:
-              - "elasticfilesystem:Client*"
+              - "elasticfilesystem:*"
             Principal:
                 AWS: !GetAtt 'ECSTaskRole.Arn'
       KmsKeyId: !GetAtt 'EFSKey.Arn'
@@ -187,7 +187,7 @@ Resources:
               Action:
                 # Allows the ECS tasks to interact with only the resources
                 # in EFS
-                - 'elasticfilesystem:Client*'
+                - 'elasticfilesystem:*'
               Resource: 
                 - "*"
 
@@ -206,7 +206,7 @@ Resources:
       ContainerDefinitions:
         - Name: !Join [ '-', [ !Ref 'AWS::StackName', 'wordpress', 'container'] ]
           Essential: 'true'
-          Image: wordpress:latest
+          Image: public.ecr.aws/docker/library/wordpress:latest # wordpress:latest
           LogConfiguration:
             LogDriver: awslogs
             Options:
