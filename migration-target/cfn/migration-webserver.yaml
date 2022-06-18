@@ -1,24 +1,13 @@
 ---
 AWSTemplateFormatVersion: "2010-09-09"
 Description: This stack deploys the core components for the webserver migration. 
-              Used the replatform method and hosted new server on ECS withj Fargate.
-
+              Used the replatform method and hosted new server on ECS with Fargate.
 
 Mappings:
   SubnetConfig:
     VPC:
       ID: 'vpc-b583f6cd'
       CIDR: '172.31.0.0/16'
-    PublicOne:
-      ID: 'subnet-507cad0d'
-    PublicTwo:
-      ID: 'subnet-54fa3c2c'
-    PrivateOne:
-      ID: 'subnet-b0b556fa'
-    PrivateTwo:
-      ID: 'subnet-5738707c'
-    InternetGateway:
-      ID: 'igw-2ef62857'
 
 
 Resources:
@@ -41,9 +30,9 @@ Resources:
         Statement:
           - Effect: "Allow"
             Action:
-              - "elasticfilesystem:ClientMount"
+              - "elasticfilesystem:Client*"
             Principal:
-                AWS: 'arn:aws:iam::111122223333:role/EfsReadOnly'
+                AWS: !GetAtt 'ECSTaskRole.Arn'
       KmsKeyId: !GetAtt 'EFSKey.Arn'
 
   EFSKey:
@@ -77,7 +66,7 @@ Resources:
   EFSMountTargetResource2:
     Type: AWS::EFS::MountTarget
     Properties:
-      FileSystemId: !Ref FileSystemResource
+      FileSystemId: !Ref EFSFileSystemResource
       SubnetId:  !ImportValue application-migration-core-PrivateSubnetTwo
       SecurityGroups:
       - !ImportValue application-migration-core-EcsContainerSecurityGroup
@@ -178,13 +167,13 @@ Resources:
                 - 'logs:PutLogEvents'
               Resource: '*'
 
-            - Effect: Allow
-              Action:
-                # Allows the ECS tasks to interact with only the resources
-                # in EFS
-                - 'elasticfilesystem:Client*'
-              Resource: 
-                - !GetAtt 'EFSFileSystemResource.Arn'
+            # - Effect: Allow
+            #   Action:
+            #     # Allows the ECS tasks to interact with only the resources
+            #     # in EFS
+            #     - 'elasticfilesystem:Client*'
+            #   Resource: 
+            #     - !GetAtt 'EFSFileSystemResource.Arn'
 
   # ECS Container task definition              
   EcsTaskDefinition:
@@ -196,12 +185,12 @@ Resources:
       TaskRoleArn: !Ref ECSTaskRole
       RequiresCompatibilities: 
         - FARGATE
+      Cpu: 256
+      Memory: 1GB
       ContainerDefinitions:
         - Name: !Join [ '-', [ !Ref 'AWS::StackName', 'wordpress', 'container'] ]
-          Cpu: '20'
           Essential: 'true'
           Image: wordpress:latest
-          Memory: '200'
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -252,7 +241,7 @@ Resources:
            - !ImportValue application-migration-core-PrivateSubnetOne
            - !ImportValue application-migration-core-PrivateSubnetTwo
       LoadBalancers:
-        - ContainerName: !Join [ '-', [ !Ref 'AWS::StackName', 'wp'] ]
+        - ContainerName: !Join [ '-', [ !Ref 'AWS::StackName', 'wordpress', 'container'] ]
           ContainerPort: 80
           TargetGroupArn: !Ref ECSTargetGroup
       #Role: !Ref EcsServiceRole
@@ -261,14 +250,14 @@ Resources:
   ECSALB:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     Properties:
-      Name: !Join [ '-', [ !Ref 'AWS::StackName', 'ALB'] ]
+      Name: "migration-wp-ALB"
       Scheme: internet-facing
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
           Value: '30'
       Subnets: 
-        - !ImportValue application-migration-PublicSubnetOne
-        - !ImportValue application-migration-PublicSubnetTwo
+        - !ImportValue application-migration-core-PublicSubnetOne
+        - !ImportValue application-migration-core-PublicSubnetTwo
       SecurityGroups:
         - !ImportValue application-migration-core-ALBSecurityGroup
 
@@ -299,16 +288,45 @@ Resources:
   ECSTargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
-      HealthCheckIntervalSeconds: 120
+      HealthCheckIntervalSeconds: 20
       HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 5
       HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 6
-      HealthyThresholdCount: 5
-      Name: !Join [ '-', [ !Ref 'AWS::StackName', 'TargetGroup'] ]
+      HealthyThresholdCount: 2
+      Name: "migration-wp-TargetGroup"
       Port: 80
       Protocol: HTTP
       UnhealthyThresholdCount: 2
+      TargetType: ip
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300
       VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  ServiceScalingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-service-autoscaling-policy"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'application-autoscaling:*'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                Resource: '*'
 
   ServiceScalingTarget:
     Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
@@ -317,7 +335,7 @@ Resources:
       MaxCapacity: 4
       MinCapacity: 2
       ResourceId: !Join [ '/', ['service', !Ref ECSCluster, !GetAtt 'EcsService.Name'] ]
-      RoleARN: !GetAtt 'AutoscalingRole.Arn'
+      RoleARN: !GetAtt 'ServiceScalingRole.Arn'
       ScalableDimension: 'ecs:service:DesiredCount'
       ServiceNamespace: ecs
 
