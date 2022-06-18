@@ -54,6 +54,22 @@ Resources:
               - 'kms:*'
             Resource: 
               - '*'
+  AccessPointWPContent:
+      Type: 'AWS::EFS::AccessPoint'
+      Properties:
+        AccessPointTags: 
+          - Key: "Name"
+            Value: "wp-content"
+        FileSystemId: !Ref EFSFileSystemResource
+        PosixUser:
+          Uid: "33"
+          Gid: "33"
+        RootDirectory:
+          CreationInfo:
+            OwnerGid: "33"
+            OwnerUid: "33"
+            Permissions: "0755"
+          Path: "/wp-content"  
 
   EFSMountTargetResource1:
     Type: AWS::EFS::MountTarget
@@ -167,13 +183,13 @@ Resources:
                 - 'logs:PutLogEvents'
               Resource: '*'
 
-            # - Effect: Allow
-            #   Action:
-            #     # Allows the ECS tasks to interact with only the resources
-            #     # in EFS
-            #     - 'elasticfilesystem:Client*'
-            #   Resource: 
-            #     - !GetAtt 'EFSFileSystemResource.Arn'
+            - Effect: Allow
+              Action:
+                # Allows the ECS tasks to interact with only the resources
+                # in EFS
+                - 'elasticfilesystem:Client*'
+              Resource: 
+                - "*"
 
   # ECS Container task definition              
   EcsTaskDefinition:
@@ -201,7 +217,7 @@ Resources:
             - ContainerPort: 80
           MountPoints: 
             - 
-              SourceVolume: data
+              SourceVolume: wp-content
               ContainerPath: "/var/www/html/wp-content"
           Environment:
             - Name: WORDPRESS_DB_HOST
@@ -213,7 +229,7 @@ Resources:
             - Name: WORDPRESS_DB_USER
               Value: 'admin'
       Volumes:
-        - Name: data
+        - Name: wp-content
           EfsVolumeConfiguration:
             FileSystemId: !Ref EFSFileSystemResource
             RootDirectory: "/wp-content"
@@ -343,32 +359,32 @@ Resources:
     Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
     Properties:
       PolicyName: !Join [ '-', [ !Ref 'AWS::StackName', 'Service-ScalingPolicy'] ]
-      PolicyType: StepScaling
+      PolicyType: TargetTrackingScaling
       ScalingTargetId: !Ref ServiceScalingTarget
-      StepScalingPolicyConfiguration:
-        AdjustmentType: PercentChangeInCapacity
-        Cooldown: 60
-        MetricAggregationType: Average
-        StepAdjustments:
-          - MetricIntervalLowerBound: 0
-            ScalingAdjustment: 200
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        # Keep things at or lower than 65% CPU utilization, for example
+        TargetValue: 65
 
-  ALB500sAlarmScaleUp:
-    Type: 'AWS::CloudWatch::Alarm'
-    Properties:
-      EvaluationPeriods: '1'
-      Statistic: Average
-      Threshold: '10'
-      AlarmDescription: Alarm if our ALB generates too many HTTP 500s.
-      Period: '60'
-      AlarmActions:
-        - !Ref ServiceScalingPolicy
-      Namespace: AWS/ApplicationELB
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt 'ECSALB.LoadBalancerFullName'
-      ComparisonOperator: GreaterThanThreshold
-      MetricName: HTTPCode_ELB_5XX_Count
+  # ALB500sAlarmScaleUp:
+  #   Type: 'AWS::CloudWatch::Alarm'
+  #   Properties:
+  #     EvaluationPeriods: '1'
+  #     Statistic: Average
+  #     Threshold: '10'
+  #     AlarmDescription: Alarm if our ALB generates too many HTTP 500s.
+  #     Period: '60'
+  #     AlarmActions:
+  #       - !Ref ServiceScalingPolicy
+  #     Namespace: AWS/ApplicationELB
+  #     Dimensions:
+  #       - Name: LoadBalancer
+  #         Value: !GetAtt 'ECSALB.LoadBalancerFullName'
+  #     ComparisonOperator: GreaterThanThreshold
+  #     MetricName: HTTPCode_ELB_5XX_Count
 
 Outputs:
   EFSFileSystemResource:

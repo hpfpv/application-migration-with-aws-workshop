@@ -187,6 +187,16 @@ Resources:
       FromPort: 31000
       ToPort: 61000
       SourceSecurityGroupId: !Ref ALBSecurityGroup
+  
+  # Security Group Ingress for the EFS to allow traffic from the ECS containers
+  EcsSecurityGroupAllowEFS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref EcsContainerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref EcsContainerSecurityGroup
 
 Outputs:
   CurrentRegion:
