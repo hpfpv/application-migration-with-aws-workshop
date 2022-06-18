@@ -1,0 +1,252 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This stack deploys the core components for the migration
+
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      ID: 'vpc-b583f6cd'
+      CIDR: '172.31.0.0/16'
+    PublicOne:
+      ID: 'subnet-507cad0d'
+    PublicTwo:
+      ID: 'subnet-54fa3c2c'
+    PrivateOne:
+      ID: 'subnet-b0b556fa'
+    PrivateTwo:
+      ID: 'subnet-5738707c'
+    InternetGateway:
+      ID: 'igw-2ef62857'
+
+
+
+Resources:
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref 'PublicRouteTable'
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !FindInMap ['SubnetConfig', 'InternetGateway', 'ID']
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !FindInMap ['SubnetConfig', 'PublicOne', 'ID']
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !FindInMap ['SubnetConfig', 'PublicTwo', 'ID']
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayAttachment:
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAttachment.AllocationId
+      SubnetId: !FindInMap ['SubnetConfig', 'PublicOne', 'ID']
+
+  PrivateRouteTableOne:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  PrivateRouteOne:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateRouteTableOneAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      SubnetId: !FindInMap ['SubnetConfig', 'PrivateOne', 'ID']
+
+  PrivateRouteTableTwo:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  PrivateRouteTwo:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateRouteTableTwoAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      SubnetId: !FindInMap ['SubnetConfig', 'PrivateTwo', 'ID']
+
+  DBPrivateSubOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+      CidrBlock: 172.31.64.0/20
+
+  DBPrivateSubTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+      CidrBlock: 172.31.80.0/20
+  
+  # DBPrivateRouteTable:
+  #   Type: AWS::EC2::RouteTable
+  #   Properties:
+  #     VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  DatabaseSecurityGroup:
+    Type: 'AWS::RDS::DBSecurityGroup'
+    Properties:
+      GroupDescription: Database Security Group
+      EC2VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+      DBSecurityGroupIngress:
+        - # Allow traffic from the replication instance
+          EC2SecurityGroupId: !Ref ReplicationInstanceSecurityGroup
+          EC2SecurityGroupOwnerId: !Ref AWS::AccountId
+        - # Allow traffic from the ECS containers
+          EC2SecurityGroupId: !Ref EcsContainerSecurityGroup
+          EC2SecurityGroupOwnerId: !Ref AWS::AccountId
+
+  ReplicationInstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Replication Instance Security Group
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  ReplicationInstanceSecurityGroupIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ReplicationInstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  DatabaseSubnetGroup: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupDescription: Subnets the RDS will be deployed
+      SubnetIds: 
+        - !Ref DBPrivateSubOne
+        - !Ref DBPrivateSubTwo
+    
+  ReplicationInstanceSubnetGroup:
+    Type: "AWS::DMS::ReplicationSubnetGroup"
+    Properties: 
+      ReplicationSubnetGroupDescription: Subnets for the replication instance
+      SubnetIds: 
+        - !FindInMap ['SubnetConfig', 'PublicOne', 'ID']
+        - !FindInMap ['SubnetConfig', 'PublicTwo', 'ID'] 
+
+  # Security Group for ECS Application Load Balancer 
+  ALBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  # Security Group for ECS Containers hosting the webser 
+  EcsContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the ECS containers from the Internet
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  # Security Group Ingress for the load Balancer
+  ALBSecurityGroupHTTPinbound:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  # Security Group Ingress for the ECS containers - only from the ALB
+  EcsSecurityGroupALBports:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref EcsContainerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 31000
+      ToPort: 61000
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+Outputs:
+  CurrentRegion:
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub "${AWS::StackName}-CurrentRegion"
+  CurrentAccount:
+    Value: !Ref AWS::AccountId
+    Export:
+      Name: !Sub "${AWS::StackName}-CurrentAccount"
+  VPCId:
+    Value: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+  PublicSubnetOne:
+    Value: !FindInMap ['SubnetConfig', 'PublicOne', 'ID']
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetOne"
+  PublicSubnetTwo:
+    Value: !FindInMap ['SubnetConfig', 'PublicTwo', 'ID']
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetTwo"
+  PrivateSubnetOne:
+    Value: !FindInMap ['SubnetConfig', 'PrivateOne', 'ID']
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetOne"
+  PrivateSubnetTwo:
+    Value: !FindInMap ['SubnetConfig', 'PrivateTwo', 'ID']
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetTwo"
+  DBPrivateSubOne:
+    Value: !Ref DBPrivateSubOne
+    Export:
+      Name: !Sub "${AWS::StackName}-DBPrivateSubOne"
+  DBPrivateSubTwo:
+    Value: !Ref DBPrivateSubTwo
+    Export:
+      Name: !Sub "${AWS::StackName}-DBPrivateSubTwo"
+  DatabaseSecurityGroup:
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSecurityGroup"
+  ReplicationInstanceSecurityGroup:
+    Value: !Ref ReplicationInstanceSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ReplicationInstanceSecurityGroup"
+  DatabaseSubnetGroup:
+    Value: !Ref DatabaseSubnetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSubnetGroup"
+  ReplicationInstanceSubnetGroup:
+    Value: !Ref ReplicationInstanceSubnetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ReplicationInstanceSubnetGroup"
+  EcsContainerSecurityGroup:
+    Value: !Ref 'EcsContainerSecurityGroup'
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsContainerSecurityGroup"
+  ALBSecurityGroup:
+    Value: !Ref 'ALBSecurityGroup'
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBSecurityGroup"
+

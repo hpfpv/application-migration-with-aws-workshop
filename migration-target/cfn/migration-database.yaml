@@ -1,0 +1,106 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This stack deploys the components for the database migration
+
+Parameters:
+  DatabaseAdmin: #DB master account
+    Description : "The database admin account. Default is mysql"
+    Type : String
+    Default: admin
+    MinLength : "1"
+    MaxLength : "41"
+    AllowedPattern : ^[a-zA-Z0-9]*$
+  DatabasePassword: #DB master account password
+    NoEcho: True
+    Description : "The database admin account password"
+    Default: mysql-password
+    Type : String
+    MinLength : "1"
+    MaxLength : "41"
+    AllowedPattern : ^[a-zA-Z0-9-+=()_!@#$%^&*~]*$ 
+
+Resources:
+  # Target database
+  Database: 
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: MySQL
+      DBInstanceIdentifier: migration-wp-database-instance
+      DBInstanceClass: db.t2.micro
+      AllocatedStorage: "20"
+      DBName: wpdatabase
+      MasterUsername: !Ref DatabaseAdmin
+      MasterUserPassword: !Ref DatabasePassword
+      StorageType: gp2
+      MaxAllocatedStorage: 20
+      DBSecurityGroups: 
+        - !ImportValue application-migration-core-DatabaseSecurityGroup
+      DBSubnetGroupName: !ImportValue application-migration-core-DatabaseSubnetGroup
+      Port: "3306"
+  
+  # DMS replication instance to handle the replication
+  ReplicationInstance: 
+    Type: "AWS::DMS::ReplicationInstance"
+    Properties: 
+      ReplicationInstanceClass: dms.t2.small
+      ReplicationSubnetGroupIdentifier: !ImportValue application-migration-core-ReplicationInstanceSubnetGroup
+      VpcSecurityGroupIds: 
+        - !ImportValue application-migration-core-ReplicationInstanceSecurityGroup
+
+  # DMS Endpoint for the source database
+  MigrationSourceDMSEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      EndpointIdentifier: migration-db-source-endpoint
+      EndpointType: source
+      EngineName: mysql
+      ServerName: !ImportValue ApplicationMigrationWorkshop-DBServerDNSName # Source database endpoint
+      Port: 3306
+      Username: wordpress-user # username to login to the source database
+      Password: AWSRocksSince2006 # Password to login to the source database
+      
+
+  # DMS Endpoint for the target database
+  MigrationTargetDMSEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      EndpointIdentifier: migration-db-target-endpoint
+      EndpointType: target
+      EngineName: mysql
+      ExtraConnectionAttributes: "parallelLoadThreads=1; initstmt=SET FOREIGN_KEY_CHECKS=0"
+      ServerName: !GetAtt 'Database.Endpoint.Address' # Target database endpoint
+      Port: 3306
+      Username: !Ref DatabaseAdmin # username to login to the target database (RDS in our case)
+      Password: !Ref DatabasePassword  # Password to login to the target database (RDS in our case)
+
+  # DMS replication task
+  MigrationReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties: 
+      MigrationType: full-load-and-cdc
+      SourceEndpointArn: !Ref MigrationSourceDMSEndpoint
+      TargetEndpointArn: !Ref MigrationTargetDMSEndpoint
+      ReplicationInstanceArn: !Ref ReplicationInstance
+      TableMappings: "{ \"rules\": [ { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"wordpress-db\", \"table-name\": \"%\" }, \"rule-action\": \"include\" } ] }"
+
+Outputs:
+  DatabaseEndpoint:
+    Value: !GetAtt 'Database.Endpoint.Address'
+    Export: 
+      Name: !Sub "${AWS::StackName}-DatabaseEndpoint"
+  ReplicationInstance:
+    Value: !Ref ReplicationInstance
+    Export: 
+      Name: !Sub "${AWS::StackName}-ReplicationInstanceArn"
+  MigrationSourceDMSEndpoint:
+    Value: !Ref MigrationSourceDMSEndpoint
+    Export: 
+      Name: !Sub "${AWS::StackName}-MigrationSourceDMSEndpointArn"
+  MigrationTargetDMSEndpoint:
+    Value: !Ref MigrationTargetDMSEndpoint
+    Export: 
+      Name: !Sub "${AWS::StackName}-MigrationTargetDMSEndpointArn"
+  MigrationReplicationTask:
+    Value: !Ref MigrationReplicationTask
+    Export: 
+      Name: !Sub "${AWS::StackName}-MigrationReplicationTaskArn"

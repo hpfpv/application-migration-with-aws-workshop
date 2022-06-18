@@ -1,0 +1,377 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This stack deploys the core components for the webserver migration. 
+              Used the replatform method and hosted new server on ECS withj Fargate.
+
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      ID: 'vpc-b583f6cd'
+      CIDR: '172.31.0.0/16'
+    PublicOne:
+      ID: 'subnet-507cad0d'
+    PublicTwo:
+      ID: 'subnet-54fa3c2c'
+    PrivateOne:
+      ID: 'subnet-b0b556fa'
+    PrivateTwo:
+      ID: 'subnet-5738707c'
+    InternetGateway:
+      ID: 'igw-2ef62857'
+
+
+Resources:
+  # EFS Filesystem for the ECS containers
+  EFSFileSystemResource:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      BackupPolicy:
+        Status: ENABLED
+      PerformanceMode: maxIO
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags:
+        - Key: Name
+          Value: MigrationWPFileSystem
+      FileSystemPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "elasticfilesystem:ClientMount"
+            Principal:
+                AWS: 'arn:aws:iam::111122223333:role/EfsReadOnly'
+      KmsKeyId: !GetAtt 'EFSKey.Arn'
+
+  EFSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Join 
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action:
+              - 'kms:*'
+            Resource: 
+              - '*'
+
+  EFSMountTargetResource1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystemResource
+      SubnetId: !ImportValue application-migration-core-PrivateSubnetOne
+      SecurityGroups:
+      - !ImportValue application-migration-core-EcsContainerSecurityGroup
+
+  EFSMountTargetResource2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemResource
+      SubnetId:  !ImportValue application-migration-core-PrivateSubnetTwo
+      SecurityGroups:
+      - !ImportValue application-migration-core-EcsContainerSecurityGroup
+
+  # ECS Cluster
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsCluster'] ]
+  
+  CloudwatchLogsGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Join ['-', [!Ref 'AWS::StackName', 'logs'] ]
+      RetentionInDays: 14
+
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsServiceRole'] ]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              # Rules which allow ECS to attach network interfaces to instances
+              # on your behalf in order for awsvpc networking mode to work right
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+
+              # Rules which allow ECS to update load balancers on your behalf
+              # with the information sabout how to send traffic to your containers
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+
+              # Rules which allow ECS to run tasks that have IAM roles assigned to them.
+              - 'iam:PassRole'
+
+              # Rules that let ECS interact with container images.
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:BatchGetImage'
+
+              # Rules that let ECS create and push logs to CloudWatch.
+              - 'logs:DescribeLogStreams'
+              - 'logs:CreateLogStream'
+              - 'logs:CreateLogGroup'
+              - 'logs:PutLogEvents'
+
+            Resource: '*'
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsTaskRole'] ]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:CreateLogGroup'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+
+            - Effect: Allow
+              Action:
+                # Allows the ECS tasks to interact with only the resources
+                # in EFS
+                - 'elasticfilesystem:Client*'
+              Resource: 
+                - !GetAtt 'EFSFileSystemResource.Arn'
+
+  # ECS Container task definition              
+  EcsTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      Family: !Join [ '-', [ !Ref 'AWS::StackName', 'task-definition'] ]
+      NetworkMode: 'awsvpc'
+      ExecutionRoleArn: !Ref EcsServiceRole
+      TaskRoleArn: !Ref ECSTaskRole
+      RequiresCompatibilities: 
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Join [ '-', [ !Ref 'AWS::StackName', 'wordpress', 'container'] ]
+          Cpu: '20'
+          Essential: 'true'
+          Image: wordpress:latest
+          Memory: '200'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: !Join [ '-', [ !Ref 'AWS::StackName', 'wp'] ]
+          PortMappings:
+            - ContainerPort: 80
+          MountPoints: 
+            - 
+              SourceVolume: data
+              ContainerPath: "/var/www/html/wp-content"
+          Environment:
+            - Name: WORDPRESS_DB_HOST
+              Value: !ImportValue 'application-migration-database-DatabaseEndpoint'
+            - Name: WORDPRESS_DB_NAME
+              Value: 'wpdatabase'
+            - Name: WORDPRESS_DB_PASSWORD
+              Value: 'mysql-password'
+            - Name: WORDPRESS_DB_USER
+              Value: 'admin'
+      Volumes:
+        - Name: data
+          EfsVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystemResource
+            RootDirectory: "/wp-content"
+            TransitEncryption: ENABLED
+        
+  EcsService:
+    Type: 'AWS::ECS::Service'
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsService'] ]
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DeploymentConfiguration: 
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      # This may need to be adjusted if the container takes a while to start up
+      HealthCheckGracePeriodSeconds: 60
+      DesiredCount: 2
+      NetworkConfiguration: 
+       AwsvpcConfiguration:
+         AssignPublicIp: "DISABLED"
+         SecurityGroups: 
+           - !ImportValue application-migration-core-EcsContainerSecurityGroup
+         Subnets: 
+           - !ImportValue application-migration-core-PrivateSubnetOne
+           - !ImportValue application-migration-core-PrivateSubnetTwo
+      LoadBalancers:
+        - ContainerName: !Join [ '-', [ !Ref 'AWS::StackName', 'wp'] ]
+          ContainerPort: 80
+          TargetGroupArn: !Ref ECSTargetGroup
+      #Role: !Ref EcsServiceRole
+      TaskDefinition: !Ref 'EcsTaskDefinition'
+
+  ECSALB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: !Join [ '-', [ !Ref 'AWS::StackName', 'ALB'] ]
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets: 
+        - !ImportValue application-migration-PublicSubnetOne
+        - !ImportValue application-migration-PublicSubnetTwo
+      SecurityGroups:
+        - !ImportValue application-migration-core-ALBSecurityGroup
+
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: EcsServiceRole
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTargetGroup
+      LoadBalancerArn: !Ref ECSALB
+      Port: '80'
+      Protocol: HTTP
+
+  ECSALBListenerRule:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*'
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+
+  ECSTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 6
+      HealthyThresholdCount: 5
+      Name: !Join [ '-', [ !Ref 'AWS::StackName', 'TargetGroup'] ]
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
+
+  ServiceScalingTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: EcsService
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 2
+      ResourceId: !Join [ '/', ['service', !Ref ECSCluster, !GetAtt 'EcsService.Name'] ]
+      RoleARN: !GetAtt 'AutoscalingRole.Arn'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ServiceNamespace: ecs
+
+  ServiceScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Join [ '-', [ !Ref 'AWS::StackName', 'Service-ScalingPolicy'] ]
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 200
+
+  ALB500sAlarmScaleUp:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: Average
+      Threshold: '10'
+      AlarmDescription: Alarm if our ALB generates too many HTTP 500s.
+      Period: '60'
+      AlarmActions:
+        - !Ref ServiceScalingPolicy
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt 'ECSALB.LoadBalancerFullName'
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: HTTPCode_ELB_5XX_Count
+
+Outputs:
+  EFSFileSystemResource:
+    Value: !Ref EFSFileSystemResource
+    Export:
+      Name: !Sub "${AWS::StackName}-EFSFileSystemResourceId"
+  EcsService:
+    Value: !Ref EcsService
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsService"
+  EcsTaskDefinition:
+    Value: !Ref EcsTaskDefinition   
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsTaskDefinition"
+  Ecscluster:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSCluster"
+  ECSALB:
+    Description: Your ALB DNS URL
+    Value: !Join [ '', [ !GetAtt 'ECSALB.DNSName' ]]
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSALB"
+
