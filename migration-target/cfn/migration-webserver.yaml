@@ -11,81 +11,11 @@ Mappings:
 
 
 Resources:
-  # EFS Filesystem for the ECS containers
-  EFSFileSystemResource:
-    Type: 'AWS::EFS::FileSystem'
+  # S3 bucket for NFS Filesystem for the ECS containers
+  S3NFSBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      BackupPolicy:
-        Status: ENABLED
-      PerformanceMode: maxIO
-      Encrypted: true
-      LifecyclePolicies:
-        - TransitionToIA: AFTER_30_DAYS
-        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
-      FileSystemTags:
-        - Key: Name
-          Value: MigrationWPFileSystem
-      FileSystemPolicy:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: "Allow"
-            Action:
-              - "elasticfilesystem:*"
-            Principal:
-                AWS: !GetAtt 'ECSTaskRole.Arn'
-      KmsKeyId: !GetAtt 'EFSKey.Arn'
-
-  EFSKey:
-    Type: AWS::KMS::Key
-    Properties:
-      KeyPolicy:
-        Version: 2012-10-17
-        Id: key-default-1
-        Statement:
-          - Sid: Allow administration of the key
-            Effect: Allow
-            Principal:
-              AWS: !Join 
-                - ''
-                - - 'arn:aws:iam::'
-                  - !Ref 'AWS::AccountId'
-                  - ':root'
-            Action:
-              - 'kms:*'
-            Resource: 
-              - '*'
-  AccessPointWPContent:
-      Type: 'AWS::EFS::AccessPoint'
-      Properties:
-        AccessPointTags: 
-          - Key: "Name"
-            Value: "wp-content"
-        FileSystemId: !Ref EFSFileSystemResource
-        PosixUser:
-          Uid: "33"
-          Gid: "33"
-        RootDirectory:
-          CreationInfo:
-            OwnerGid: "33"
-            OwnerUid: "33"
-            Permissions: "0755"
-          Path: "/wp-content"  
-
-  EFSMountTargetResource1:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystemResource
-      SubnetId: !ImportValue application-migration-core-PrivateSubnetOne
-      SecurityGroups:
-      - !ImportValue application-migration-core-EcsContainerSecurityGroup
-
-  EFSMountTargetResource2:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystemResource
-      SubnetId:  !ImportValue application-migration-core-PrivateSubnetTwo
-      SecurityGroups:
-      - !ImportValue application-migration-core-EcsContainerSecurityGroup
+      BucketName: !Sub 'houessou-${AWS::StackName}' 
 
   # ECS Cluster
   ECSCluster:
@@ -182,7 +112,17 @@ Resources:
                 - 'logs:CreateLogGroup'
                 - 'logs:PutLogEvents'
               Resource: '*'
-
+            - Effect: Allow
+              Action:
+                # Allows the ECS tasks to interact with only the resources
+                # in S3
+                - 's3:PutObject'
+                - 's3:GetObject'
+                - 's3:DeleteObject'
+                - 's3:ListBucket'
+              Resource: 
+                - !ImportValue 'todo-houessou-com-attachments-service-TodoFilesBucketArn'
+                - !Join ['', [!ImportValue 'todo-houessou-com-attachments-service-TodoFilesBucketArn', '/*']]
             - Effect: Allow
               Action:
                 # Allows the ECS tasks to interact with only the resources
@@ -190,6 +130,9 @@ Resources:
                 - 'elasticfilesystem:*'
               Resource: 
                 - "*"
+              Condition:
+                Bool:
+                  Elasticfilesystem:AccessedViaMountTarget: 'true'
 
   # ECS Container task definition              
   EcsTaskDefinition:
@@ -215,10 +158,17 @@ Resources:
               awslogs-stream-prefix: !Join [ '-', [ !Ref 'AWS::StackName', 'wp'] ]
           PortMappings:
             - ContainerPort: 80
-          MountPoints: 
-            - 
-              SourceVolume: wp-content
-              ContainerPath: "/var/www/html/wp-content"
+          Command:
+            - "#!/bin/bash -x\nif [-f \"./dont_run_again\"]\nthen\n  echo \"\
+              Initialization was done already earlier\"\nelse\n  apt-get update\n  apt-get\
+              \ install dos2unix wget -y\n  cd ~ && wget https://houessou-config-bucket.s3-us-west-2.amazonaws.com/application-migration-with-aws-workshop/s3fs.sh\n\
+              \  chmod +x ./s3fs.sh\n  dos2unix *.sh\n\
+              \  su -c '/bin/bash s3fs.sh'\n  rm ./s3fs.sh\n\
+              \  touch ./dont_run_again\nfi\n"
+          # MountPoints: 
+          #   - 
+          #     SourceVolume: wp-content
+          #     ContainerPath: "/var/www/html/wp-content"
           Environment:
             - Name: WORDPRESS_DB_HOST
               Value: !ImportValue 'application-migration-database-DatabaseEndpoint'
@@ -228,12 +178,14 @@ Resources:
               Value: 'mysql-password'
             - Name: WORDPRESS_DB_USER
               Value: 'admin'
-      Volumes:
-        - Name: wp-content
-          EfsVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystemResource
-            RootDirectory: "/wp-content"
-            TransitEncryption: ENABLED
+            - Name: NFS_S3_BUCKET
+              Value: !Ref S3NFSBucket
+      # Volumes:
+      #   - Name: wp-content
+      #     EfsVolumeConfiguration:
+      #       FileSystemId: !Ref EFSFileSystemResource
+      #       RootDirectory: "/wp-content"
+      #       TransitEncryption: ENABLED
         
   EcsService:
     Type: 'AWS::ECS::Service'
