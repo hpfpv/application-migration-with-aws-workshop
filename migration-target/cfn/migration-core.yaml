@@ -98,12 +98,14 @@ Resources:
     Properties:
       VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
       CidrBlock: 172.31.64.0/20
+      AvailabilityZoneId: usw2-az1
 
   DBPrivateSubTwo:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !FindInMap ['SubnetConfig', 'VPC', 'ID']
       CidrBlock: 172.31.80.0/20
+      AvailabilityZoneId: usw2-az2
   
   # DBPrivateRouteTable:
   #   Type: AWS::EC2::RouteTable

@@ -121,18 +121,8 @@ Resources:
                 - 's3:DeleteObject'
                 - 's3:ListBucket'
               Resource: 
-                - !ImportValue 'todo-houessou-com-attachments-service-TodoFilesBucketArn'
-                - !Join ['', [!ImportValue 'todo-houessou-com-attachments-service-TodoFilesBucketArn', '/*']]
-            - Effect: Allow
-              Action:
-                # Allows the ECS tasks to interact with only the resources
-                # in EFS
-                - 'elasticfilesystem:*'
-              Resource: 
-                - "*"
-              Condition:
-                Bool:
-                  Elasticfilesystem:AccessedViaMountTarget: 'true'
+                - !GetAtt 'S3NFSBucket.Arn'
+                - !Join ['',[!GetAtt 'S3NFSBucket.Arn','/*']]
 
   # ECS Container task definition              
   EcsTaskDefinition:
@@ -159,7 +149,7 @@ Resources:
           PortMappings:
             - ContainerPort: 80
           Command:
-            - "#!/bin/bash -x\nif [-f \"./dont_run_again\"]\nthen\n  echo \"\
+            - "/bin/bash -x\nif [-f \"./dont_run_again\"]\nthen\n  echo \"\
               Initialization was done already earlier\"\nelse\n  apt-get update\n  apt-get\
               \ install dos2unix wget -y\n  cd ~ && wget https://houessou-config-bucket.s3-us-west-2.amazonaws.com/application-migration-with-aws-workshop/s3fs.sh\n\
               \  chmod +x ./s3fs.sh\n  dos2unix *.sh\n\
@@ -340,9 +330,9 @@ Resources:
 
 Outputs:
   EFSFileSystemResource:
-    Value: !Ref EFSFileSystemResource
+    Value: !Ref S3NFSBucket
     Export:
-      Name: !Sub "${AWS::StackName}-EFSFileSystemResourceId"
+      Name: !Sub "${AWS::StackName}-S3NFSBucket"
   EcsService:
     Value: !Ref EcsService
     Export:
